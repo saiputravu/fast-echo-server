@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <iostream>
 #include <netinet/in.h>
+#include <sys/epoll.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <thread>
@@ -71,13 +72,33 @@ auto main(int argc, char *argv[]) -> int {
   struct sockaddr_in client;
   auto client_len = socklen_t{sizeof(client)};
 
+  // Setup epolling to see read (i.e., recv) events.
+  auto epfd = epoll_create1(0);
+  struct epoll_event event{.events = EPOLLIN, .data = epoll_data{.fd = fd}};
+  epoll_ctl(epfd, EPOLL_CTL_ADD, fd, &event);
+
+  // Allocate space to receive events.
+  struct epoll_event events[100];
+
   int err = 0;
   while (err != -1) {
-    err = recvfrom(fd, message, utils::MESSAGE_SIZE, 0,
-                   reinterpret_cast<struct sockaddr *>(&client), &client_len);
-    err |= sendto(fd, message, utils::MESSAGE_SIZE, 0,
-                  reinterpret_cast<struct sockaddr *>(&client), client_len);
-    ++counter;
+    auto nfds = epoll_wait(epfd, events, 100, 0);
+    if (nfds == -1) {
+      std::cerr << "failed on epoll_wait errno=" << errno << std::endl;
+      break;
+    }
+
+    // Parse all the epoll events.
+    for (int i = 0; i < nfds; ++i) {
+      // We want to burst send the events out. As this is UDP, we don't have
+      // accept to generate a new FD, which we would then have to track via
+      // EPOLL.
+      err = recvfrom(fd, message, utils::MESSAGE_SIZE, 0,
+                     reinterpret_cast<struct sockaddr *>(&client), &client_len);
+      err |= sendto(fd, message, utils::MESSAGE_SIZE, 0,
+                    reinterpret_cast<struct sockaddr *>(&client), client_len);
+      ++counter;
+    }
   }
 
   if (errno) {

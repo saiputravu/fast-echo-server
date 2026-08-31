@@ -1,8 +1,10 @@
+#include "sync.h"
 #include "utils.h"
 
 #include <cerrno>
 #include <cstdint>
 #include <cstdlib>
+#include <format>
 #include <iostream>
 #include <linux/errqueue.h>
 #include <linux/net_tstamp.h>
@@ -12,6 +14,8 @@
 #include <sys/types.h>
 #include <sys/uio.h>
 #include <thread>
+#include <unistd.h>
+#include <unordered_set>
 #include <utility>
 
 struct args {
@@ -35,7 +39,9 @@ auto parse_args(int argc, char *argv[]) -> args {
 
 // ON err, return INT64_MAX.
 //
-// Returns (id, timestamp)
+// Returns (id, timestamp); id is only set on the tx-side
+// because apparently the kernel thinks it is fine to track on the
+// send side yourself :D.
 auto get_ts(struct msghdr *mhdr) -> std::pair<uint64_t, uint64_t> {
   auto p = std::make_pair(UINT64_MAX, UINT64_MAX);
   for (auto *cmsg = CMSG_FIRSTHDR(mhdr); cmsg != nullptr;
@@ -50,7 +56,7 @@ auto get_ts(struct msghdr *mhdr) -> std::pair<uint64_t, uint64_t> {
             tsdata->ts[0].tv_sec * 1'000'000'000LL + tsdata->ts[0].tv_nsec;
       }
     } else if (cmsg->cmsg_level == SOL_IP && cmsg->cmsg_type == IP_RECVERR) {
-      // Case 2: Packet ID
+      // Case 2: Packet ID, only on tx side, EE_DATA.
       auto serr = reinterpret_cast<struct sock_extended_err *>(CMSG_DATA(cmsg));
       if (serr != nullptr && serr->ee_origin == SO_EE_ORIGIN_TIMESTAMPING &&
           serr->ee_errno == ENOMSG) {
@@ -61,6 +67,87 @@ auto get_ts(struct msghdr *mhdr) -> std::pair<uint64_t, uint64_t> {
   return p;
 }
 
+// flush_udp_errequeue will drain the tx timestamped socket control messages.
+// This is expected to run in its own thread.
+void flush_udp_errqueue(std::atomic<bool> &alive, int fd,
+                        SyncMap<uint64_t, uint64_t> &tx_tss) {
+  char *ctrl = reinterpret_cast<char *>(malloc(1024));
+  struct msghdr mhdr{0};
+  mhdr.msg_control = ctrl;
+
+  while (alive.load()) {
+    // See recvmsg(2) and the comment about the other location where msg_controllen
+    // is used. This is overwritten with length of read control message sequence.
+    mhdr.msg_controllen = 1024;
+    auto err = recvmsg(fd, &mhdr, MSG_ERRQUEUE);
+    if (err < 0) {
+      if (errno != EAGAIN) {
+        std::cerr << "[flush] unable to recvmsg, errno=" << errno << std::endl;
+      }
+      continue;
+    }
+
+    auto [tx_id, tx_ts] = get_ts(&mhdr);
+    if (tx_ts == UINT64_MAX) {
+      std::cerr << "[flush] failed to set tx_ts" << std::endl;
+      continue;
+    }
+    tx_tss.set(tx_id, tx_ts);
+  }
+
+  free(ctrl);
+}
+
+// match_tss will look through both the rx and tx timestamps and match
+// based on ids. It will then clear out the matched ids. This will be used
+// monitor global statistics around latency.
+void match_tss(std::atomic<bool> &alive, SyncMap<uint64_t, uint64_t> &rx_tss,
+               SyncMap<uint64_t, uint64_t> &tx_tss) {
+  // Setup some space. 1000 was just chosen arbitrarily.
+  std::unordered_set<uint64_t> to_delete;
+  to_delete.reserve(1000);
+
+  // Track variables for summary statistics
+  uint64_t count = 0;
+  uint64_t sum = 0;
+  uint64_t sumsq = 0;
+
+  while (alive.load()) {
+    // We iterate over tx_tss, which we care less about blocking access to.
+    for (auto &[tx_id, tx_ts] : tx_tss.copy()) {
+      auto res = rx_tss.find(tx_id);
+      if (res) {
+        // At this point, rx and tx timestamps match and are known. We can track
+        // if we want. Then we queue these timestamps for removal.
+        to_delete.insert(tx_id);
+
+        auto [_, rx_ts] = res.value();
+        auto delta = rx_ts - tx_ts;
+        ++count;
+        sum += delta;
+        sumsq += delta * delta;
+      }
+    }
+
+    // Delete all matched.
+    for (auto id : to_delete) {
+      tx_tss.remove(id);
+      rx_tss.remove(id);
+    }
+    to_delete.clear();
+
+    std::this_thread::sleep_for(std::operator""ms(100));
+
+    // Print summary statistics.
+    if (count > 0) {
+      double mean = static_cast<double>(sum) / count;
+      std::cout << " mean=" << mean
+                << " var=" << (static_cast<double>(sumsq) / count) - mean * mean
+                << std::endl;
+    }
+  }
+}
+
 auto main(int argc, char *argv[]) -> int {
   auto a = parse_args(argc, argv);
 
@@ -68,6 +155,15 @@ auto main(int argc, char *argv[]) -> int {
   if (fd < 0) {
     return fd;
   }
+
+  std::atomic<bool> alive{true};
+  // These will map the id->timestamp so we can perform the matching later.
+  SyncMap<uint64_t, uint64_t> rx_tss;
+  SyncMap<uint64_t, uint64_t> tx_tss;
+
+  // Setup background threads.
+  std::thread flush{[&]() { flush_udp_errqueue(alive, fd, tx_tss); }};
+  std::thread match{[&]() { match_tss(alive, rx_tss, tx_tss); }};
 
   // Tries to connect to IP and port given.
   struct sockaddr_in addr;
@@ -107,11 +203,12 @@ auto main(int argc, char *argv[]) -> int {
     return -1;
   }
 
-  // Set message to all 0x3f bytes. This message gets ping-ponged back and
-  // forth. We use the first sizeof(long) bytes as the timestamp.
-  char *message = reinterpret_cast<char *>(malloc(utils::MESSAGE_SIZE));
-  for (std::size_t i = 0; i < utils::MESSAGE_SIZE; ++i) {
-    message[i] = 0x3f;
+  // Set message to some data. This message gets ping-ponged back and forth.
+  uint64_t message_len = utils::MESSAGE_SIZE / sizeof(uint64_t);
+  uint64_t *message =
+      reinterpret_cast<uint64_t *>(calloc(message_len, sizeof(uint64_t)));
+  for (int i = 0; i < message_len; ++i) {
+    message[i] = i;
   }
 
   // Unbuffer the cout.
@@ -125,67 +222,52 @@ auto main(int argc, char *argv[]) -> int {
   struct msghdr mhdr{0};
   mhdr.msg_control = ctrl;
   mhdr.msg_controllen = 1024;
+  struct iovec iov{.iov_base = message, .iov_len = utils::MESSAGE_SIZE};
+  mhdr.msg_iov = &iov;
+  mhdr.msg_iovlen = 1;
 
-  // We don't set this, as we dont expect to read packet data into this at
-  // all. Either on recv, we discard; on send, we don't want packet data
-  // duplicated.
-  //
-  // Also, if we ever use this, note the side-effect comment at recvmsg
-  // below. We should re-write these fields. Annoying.
-  //
-  // struct iovec iov{.iov_base = message, .iov_len = sizeof(message)};
-  // mhdr.msg_iov = &iov;
-  // mhdr.msg_iovlen = 1;
-
+  uint64_t last_id = 0;
   // Busy loop send.
   while (true) {
-    std::this_thread::sleep_for(std::operator""ms(2000));
 
-    // Setup timestamp as first bytes.
-    auto bef = utils::gettime();
-    *reinterpret_cast<long *>(message) = bef;
+    std::this_thread::sleep_for(std::operator""ms(10));
 
     if (send(fd, message, utils::MESSAGE_SIZE, 0) < 0) {
-      std::cerr << "failed send at " << bef << " errno=" << errno << std::endl;
+      std::cerr << "failed recv errno=" << errno << std::endl;
       continue;
     }
 
-    // recvmsg will have overwritten our mhdr, so we reset variables we care
-    // about side-effects for.
+    // As described in recvmsg(2), msg_controllen will be overwritten with the
+    // length of the control message sequence read. We set it again to ensure it
+    // is accurate. This also happens for msg_namelen, but we don't use it so
+    // we're chilling.
     mhdr.msg_controllen = 1024;
-    mhdr.msg_flags = 0;
     if (recvmsg(fd, &mhdr, 0) < 0) {
-      std::cerr << "failed recv at " << bef << " errno=" << errno << std::endl;
+      std::cerr << "failed recv errno=" << errno << std::endl;
       continue;
     }
 
-    // Get the rx timestamp out from the ctrl headers. Archaic C macros.
-    // rx_id is meaningless, recvmsg trashes our fields in iov anyways.
-    auto [rx_id, rx_ts] = get_ts(&mhdr);
+    // Get the rx timestamp out from the ctrl headers. Archaic C macros (in
+    // get_ts). rx_id is meaningless, since timestamping behaviour only sets
+    // this for tx side.
+    auto [_, rx_ts] = get_ts(&mhdr);
     if (rx_ts == UINT64_MAX) {
       std::cerr << "failed to set rx_ts" << std::endl;
       continue;
     }
 
-    // Get the tx timestamp out the skb errqueue. Even more archaic nonsense.
-    // We have to re-issue a recvmsg onto the errqueue specifically to receive
-    // this. We'll reuse the old mhdr. We reset the overwritten mhdr as before.
-    mhdr.msg_controllen = 1024;
-    mhdr.msg_flags = 0;
-    if (recvmsg(fd, &mhdr, MSG_ERRQUEUE) < 0) {
-      std::cerr << "failed recv errqueue at " << bef << " errno=" << errno
-                << std::endl;
-      continue;
-    }
+    // Track the id->timestamp mapping. Update the last_id. This will track
+    // against the IDs set in ee_data. This is slightly annoying, but it is fine
+    // as the docs guarantee that it starts from 0 at file descriptor
+    // instantiation.
+    rx_tss.set(last_id++, rx_ts);
 
-    auto [tx_id, tx_ts] = get_ts(&mhdr);
-    if (tx_ts == UINT64_MAX) {
-      std::cerr << "failed to set tx_ts" << std::endl;
-      continue;
-    }
-    std::cout << "send_id=" << tx_id << " send=" << tx_ts << " recv=" << rx_ts
-              << " delta=" << rx_ts - tx_ts << std::endl;
+    // The actual rx<-->tx matching is done in the background threads.
   }
+
+  alive.store(false);
+  flush.join();
+  match.join();
   free(message);
   free(ctrl);
 }

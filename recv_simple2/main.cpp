@@ -71,12 +71,21 @@ auto main(int argc, char *argv[]) -> int {
   struct sockaddr_in client;
   auto client_len = socklen_t{sizeof(client)};
 
-  int err = 0;
+  // First recv will be the client we always send messages to.
+  int err = recvfrom(fd, message, utils::MESSAGE_SIZE, 0,
+                     reinterpret_cast<struct sockaddr *>(&client), &client_len);
+  if (connect(fd, reinterpret_cast<struct sockaddr *>(&client), client_len) <
+      0) {
+    std::cerr << "failed to connect to client ip=" << client.sin_addr.s_addr
+              << " port=" << client.sin_port << " errno=" << errno << std::endl;
+    return -1;
+  }
+  send(fd, message, utils::MESSAGE_SIZE, 0);
+
+  err = 0;
   while (err != -1) {
-    err = recvfrom(fd, message, utils::MESSAGE_SIZE, 0,
-                   reinterpret_cast<struct sockaddr *>(&client), &client_len);
-    err |= sendto(fd, message, utils::MESSAGE_SIZE, 0,
-                  reinterpret_cast<struct sockaddr *>(&client), client_len);
+    err = recv(fd, message, utils::MESSAGE_SIZE, 0);
+    err |= send(fd, message, utils::MESSAGE_SIZE, 0);
     ++counter;
   }
 
