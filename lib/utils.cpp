@@ -1,5 +1,6 @@
 #include "utils.h"
 
+#include <algorithm>
 #include <arpa/inet.h>
 #include <cerrno>
 #include <chrono>
@@ -10,6 +11,7 @@
 #include <stdexcept>
 #include <string>
 #include <sys/socket.h>
+#include <thread>
 
 namespace utils {
 
@@ -52,6 +54,22 @@ long gettime() {
   return std::chrono::duration_cast<std::chrono::nanoseconds>(
              now.time_since_epoch())
       .count();
+}
+
+void logger(const std::uint64_t &counter, const bool &alive) {
+  std::uint64_t last_seen_counter{0};
+  while (alive) {
+    std::uint64_t counter_now = counter;
+    if (last_seen_counter < counter_now) {
+      // >= 1 packet sent.
+      auto now = std::chrono::high_resolution_clock::now();
+      std::cerr << now.time_since_epoch().count() << ": sent "
+                << counter_now - last_seen_counter << " msg(s) recently"
+                << std::endl;
+      last_seen_counter = std::max(counter_now, last_seen_counter);
+    }
+    std::this_thread::sleep_for(std::operator""ms(200));
+  }
 }
 
 } // namespace utils

@@ -17,23 +17,7 @@ struct args {
 };
 
 uint64_t counter{0};
-uint64_t last_seen_counter{0};
 bool alive{true};
-
-auto logger() {
-  while (alive) {
-    uint64_t counter_now = counter;
-    if (last_seen_counter < counter_now) {
-      // >= 1 packet sent.
-      auto now = std::chrono::high_resolution_clock::now();
-      std::cerr << now.time_since_epoch().count() << ": sent "
-                << counter_now - last_seen_counter << " msg(s) recently"
-                << std::endl;
-      last_seen_counter = std::max(counter_now, last_seen_counter);
-    }
-    std::this_thread::sleep_for(std::operator""ms(200));
-  }
-}
 
 auto parse_args(int argc, char *argv[]) -> args {
   if (argc < 2) {
@@ -49,7 +33,7 @@ auto parse_args(int argc, char *argv[]) -> args {
 auto main(int argc, char *argv[]) -> int {
   auto a = parse_args(argc, argv);
 
-  std::thread l(logger);
+  std::thread l([] { utils::logger(counter, alive); });
 
   int fd = utils::make_udp_socket();
   if (fd < 0) {

@@ -26,6 +26,10 @@ in_addr parse_ip(const char *ip_str);
 // Returns the current high_resolution_clock time in nanoseconds since epoch.
 long gettime();
 
+// Periodically logs how many messages have been echoed since the last report.
+// Reads the shared `counter` and runs until `alive` becomes false.
+void logger(const std::uint64_t &counter, const bool &alive);
+
 } // namespace utils
 
 #endif // FAST_ECHO_SERVER_UTILS_H
