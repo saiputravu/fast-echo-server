@@ -1,4 +1,5 @@
 #include "sender.h"
+#include "stats.h"
 #include "sync.h"
 #include "utils.h"
 
@@ -82,17 +83,20 @@ void flush_udp_errqueue(std::atomic<bool> *alive, int fd,
 // match_tss will look through both the rx and tx timestamps and match
 // based on ids. It will then clear out the matched ids. This will be used
 // monitor global statistics around latency.
+//
+// Every 100ms it publishes a rolling-window snapshot of the latency stats for
+// this thread into `metrics` (keyed by thread_id) for the dashboard to render,
+// then resets the accumulator so each window reflects current conditions.
 void match_tss(int thread_id, std::atomic<bool> *alive,
                SyncMap<uint64_t, uint64_t> &rx_tss,
-               SyncMap<uint64_t, uint64_t> &tx_tss) {
+               SyncMap<uint64_t, uint64_t> &tx_tss,
+               SyncMap<int, MetricSnapshot> &metrics) {
   // Setup some space. 1000 was just chosen arbitrarily.
   std::unordered_set<uint64_t> to_delete;
   to_delete.reserve(1000);
 
-  // Track variables for summary statistics
-  uint64_t count = 0;
-  uint64_t sum = 0;
-  uint64_t sumsq = 0;
+  // Rolling-window latency statistics for this thread.
+  Statistics stats;
 
   while (alive->load()) {
     // We iterate over tx_tss, which we care less about blocking access to.
@@ -104,10 +108,7 @@ void match_tss(int thread_id, std::atomic<bool> *alive,
         to_delete.insert(tx_id);
 
         auto [_, rx_ts] = res.value();
-        auto delta = rx_ts - tx_ts;
-        ++count;
-        sum += delta;
-        sumsq += delta * delta;
+        stats.add(static_cast<double>(rx_ts - tx_ts));
       }
     }
 
@@ -120,18 +121,15 @@ void match_tss(int thread_id, std::atomic<bool> *alive,
 
     std::this_thread::sleep_for(std::operator""ms(100));
 
-    // Print summary statistics.
-    if (count > 0) {
-      double mean = static_cast<double>(sum) / count;
-      std::cout << thread_id << " mean=" << mean
-                << " var=" << (static_cast<double>(sumsq) / count) - mean * mean
-                << std::endl;
-    }
+    // Publish this window's snapshot and start the next window.
+    metrics.set(thread_id, {stats.mean(), stats.stddev(), stats.count});
+    stats.reset();
   }
 }
 
 int runner(int thread_id, in_addr ip, ushort port, std::string ip_str,
-           uint64_t waitus, std::atomic<bool> *alive) {
+           uint64_t waitus, std::atomic<bool> *alive,
+           SyncMap<int, MetricSnapshot> *metrics) {
   int fd = utils::make_udp_socket();
   if (fd < 0) {
     return fd;
@@ -143,7 +141,8 @@ int runner(int thread_id, in_addr ip, ushort port, std::string ip_str,
 
   // Setup background threads.
   std::thread flush{[&]() { flush_udp_errqueue(alive, fd, tx_tss); }};
-  std::thread match{[&]() { match_tss(thread_id, alive, rx_tss, tx_tss); }};
+  std::thread match{
+      [&]() { match_tss(thread_id, alive, rx_tss, tx_tss, *metrics); }};
 
   // Tries to connect to IP and port given.
   struct sockaddr_in addr;
@@ -226,6 +225,10 @@ int runner(int thread_id, in_addr ip, ushort port, std::string ip_str,
       std::cerr << "failed recv errno=" << errno << std::endl;
       continue;
     }
+    // We want to track the sent rx-id as close to success of send as possible.
+    // This also means that our ID is +1 of true id. We use an unsigned value so
+    // we should use last_id-1 for true id mapping.
+    ++last_id;
 
     // As described in recvmsg(2), msg_controllen will be overwritten with the
     // length of the control message sequence read. We set it again to ensure it
@@ -258,11 +261,10 @@ int runner(int thread_id, in_addr ip, ushort port, std::string ip_str,
       continue;
     }
 
-    // Track the id->timestamp mapping. Update the last_id. This will track
-    // against the IDs set in ee_data. This is slightly annoying, but it is fine
+    // Track the id->timestamp mapping. This is slightly annoying, but it is fine
     // as the docs guarantee that it starts from 0 at file descriptor
-    // instantiation.
-    rx_tss.set(last_id++, rx_ts);
+    // instantiation. last_id is one ahead of id.
+    rx_tss.set(last_id-1, rx_ts);
 
     // The actual rx<-->tx matching is done in the background threads.
   }

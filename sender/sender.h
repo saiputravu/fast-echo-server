@@ -1,6 +1,7 @@
 #ifndef FAST_ECHO_SERVER_SENDER_H
 #define FAST_ECHO_SERVER_SENDER_H
 
+#include "stats.h"
 #include "sync.h"
 
 #include <atomic>
@@ -30,9 +31,11 @@ void match_tss(std::atomic<bool> &alive, SyncMap<uint64_t, uint64_t> &rx_tss,
 
 // Connects the UDP socket fd to ip:port, enables software timestamping, and
 // ping-pongs fixed-size messages while background threads collect latency
-// stats. Returns a negative value on setup failure. ip_str is used only for
-// logging.
+// stats. Each 100ms window's stats are published into `metrics` keyed by
+// thread_id for the dashboard. Returns a negative value on setup failure.
+// ip_str is used only for logging.
 int runner(int thread_id, in_addr ip, ushort port, std::string ip_str,
-           uint64_t waitus, std::atomic<bool> *alive);
+           uint64_t waitus, std::atomic<bool> *alive,
+           SyncMap<int, MetricSnapshot> *metrics);
 
 #endif // FAST_ECHO_SERVER_SENDER_H

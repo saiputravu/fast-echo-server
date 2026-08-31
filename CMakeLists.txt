@@ -10,6 +10,15 @@ project(tcp-echo-server)
 find_package(Threads REQUIRED)
 link_libraries(Threads::Threads)
 
+find_package(ftxui QUIET CONFIG)
+if(NOT ftxui_FOUND)
+  include(FetchContent)
+  FetchContent_Declare(ftxui
+    GIT_REPOSITORY https://github.com/ArthurSonzogni/FTXUI
+    GIT_TAG v7.0.3)
+  FetchContent_MakeAvailable(ftxui)
+endif()
+
 add_subdirectory(./lib)
 add_subdirectory(./sender)
 add_subdirectory(./recv_simple)
