@@ -72,20 +72,33 @@ auto main(int argc, char *argv[]) -> int {
   auto client_len = socklen_t{sizeof(client)};
 
   // First recv will be the client we always send messages to.
-  int err = recvfrom(fd, message, utils::MESSAGE_SIZE, 0,
-                     reinterpret_cast<struct sockaddr *>(&client), &client_len);
+  int errsz =
+      recvfrom(fd, message, utils::MESSAGE_SIZE, 0,
+               reinterpret_cast<struct sockaddr *>(&client), &client_len);
   if (connect(fd, reinterpret_cast<struct sockaddr *>(&client), client_len) <
       0) {
     std::cerr << "failed to connect to client ip=" << client.sin_addr.s_addr
               << " port=" << client.sin_port << " errno=" << errno << std::endl;
     return -1;
   }
+  // See comment below.
+  for (int i = 0; i < errsz / sizeof(uint64_t); ++i) {
+    message[i] ^= i;
+  }
   send(fd, message, utils::MESSAGE_SIZE, 0);
 
-  err = 0;
-  while (err != -1) {
-    err = recv(fd, message, utils::MESSAGE_SIZE, 0);
-    err |= send(fd, message, utils::MESSAGE_SIZE, 0);
+  errsz = 0;
+  while (errsz != -1) {
+    errsz = recv(fd, message, utils::MESSAGE_SIZE, 0);
+
+    // Do some "processing" by setting all the bytes to 0. If the message is
+    // garbled or if we receive less than the whole message, the other side
+    // will know.
+    for (int i = 0; i < errsz / sizeof(uint64_t); ++i) {
+      message[i] ^= i;
+    }
+
+    errsz |= send(fd, message, utils::MESSAGE_SIZE, 0);
     ++counter;
   }
 

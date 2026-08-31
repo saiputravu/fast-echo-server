@@ -80,8 +80,8 @@ auto main(int argc, char *argv[]) -> int {
   // Allocate space to receive events.
   struct epoll_event events[100];
 
-  int err = 0;
-  while (err != -1) {
+  int errsz = 0;
+  while (errsz != -1) {
     auto nfds = epoll_wait(epfd, events, 100, 0);
     if (nfds == -1) {
       std::cerr << "failed on epoll_wait errno=" << errno << std::endl;
@@ -93,10 +93,19 @@ auto main(int argc, char *argv[]) -> int {
       // We want to burst send the events out. As this is UDP, we don't have
       // accept to generate a new FD, which we would then have to track via
       // EPOLL.
-      err = recvfrom(fd, message, utils::MESSAGE_SIZE, 0,
-                     reinterpret_cast<struct sockaddr *>(&client), &client_len);
-      err |= sendto(fd, message, utils::MESSAGE_SIZE, 0,
-                    reinterpret_cast<struct sockaddr *>(&client), client_len);
+      errsz =
+          recvfrom(fd, message, utils::MESSAGE_SIZE, 0,
+                   reinterpret_cast<struct sockaddr *>(&client), &client_len);
+
+      // Do some "processing" by setting all the bytes to 0. If the message is
+      // garbled or if we receive less than the whole message, the other side
+      // will know.
+      for (int i = 0; i < errsz / sizeof(uint64_t); ++i) {
+        message[i] ^= i;
+      }
+
+      errsz |= sendto(fd, message, utils::MESSAGE_SIZE, 0,
+                      reinterpret_cast<struct sockaddr *>(&client), client_len);
       ++counter;
     }
   }

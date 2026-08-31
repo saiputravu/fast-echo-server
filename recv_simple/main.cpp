@@ -71,12 +71,20 @@ auto main(int argc, char *argv[]) -> int {
   struct sockaddr_in client;
   auto client_len = socklen_t{sizeof(client)};
 
-  int err = 0;
-  while (err != -1) {
-    err = recvfrom(fd, message, utils::MESSAGE_SIZE, 0,
-                   reinterpret_cast<struct sockaddr *>(&client), &client_len);
-    err |= sendto(fd, message, utils::MESSAGE_SIZE, 0,
-                  reinterpret_cast<struct sockaddr *>(&client), client_len);
+  int errsz = 0;
+  while (errsz != -1) {
+    errsz = recvfrom(fd, message, utils::MESSAGE_SIZE, 0,
+                     reinterpret_cast<struct sockaddr *>(&client), &client_len);
+
+    // Do some "processing" by setting all the bytes to 0. If the message is
+    // garbled or if we receive less than the whole message, the other side
+    // will know.
+    for (int i = 0; i < errsz / sizeof(uint64_t); ++i) {
+      message[i] ^= i;
+    }
+
+    errsz |= sendto(fd, message, utils::MESSAGE_SIZE, 0,
+                    reinterpret_cast<struct sockaddr *>(&client), client_len);
     ++counter;
   }
 
