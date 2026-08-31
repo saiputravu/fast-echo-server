@@ -183,7 +183,7 @@ int runner(int thread_id, in_addr ip, ushort port, std::string ip_str,
   }
 
   // Add socket timeout.
-  struct timeval timeout{.tv_sec = 0, .tv_usec = 100000};
+  struct timeval timeout{.tv_sec = 0, .tv_usec = 200000};
   if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0) {
     std::cerr << "failed to set socket timeout=" << timeout.tv_usec
               << " errno=" << errno << std::endl;
@@ -222,7 +222,7 @@ int runner(int thread_id, in_addr ip, ushort port, std::string ip_str,
     std::this_thread::sleep_for(std::operator""us(waitus));
 
     if (send(fd, sendmessage, utils::MESSAGE_SIZE, 0) < 0) {
-      std::cerr << "failed recv errno=" << errno << std::endl;
+      std::cerr << "failed send errno=" << errno << std::endl;
       continue;
     }
     // We want to track the sent rx-id as close to success of send as possible.

@@ -1,3 +1,4 @@
+#include "cli.h"
 #include "sender.h"
 #include "stats.h"
 #include "sync.h"
@@ -20,38 +21,6 @@
 #include <ftxui/component/event.hpp>
 #include <ftxui/component/screen_interactive.hpp>
 #include <ftxui/dom/elements.hpp>
-
-struct args {
-  std::string ip_str;
-  in_addr ip;
-  ushort port;
-  size_t threads;
-  uint64_t waitus;
-};
-
-auto parse_args(int argc, char *argv[]) -> args {
-  if (argc < 3) {
-    std::cerr << "Usage: " << argv[0] << " <ip> <port> [threads (default 1)] [timeout (us) (default 10us)]"
-              << std::endl;
-    exit(-1);
-  }
-
-  struct args a;
-  a.ip_str = argv[1];
-  a.ip = utils::parse_ip(argv[1]);
-  a.port = utils::parse_port(argv[2]);
-
-  a.threads = 1;
-  a.waitus = 10;
-
-  if (argc > 3) {
-    a.threads = std::stoul(argv[3]);
-  }
-  if (argc > 4) {
-    a.waitus = std::stoul(argv[4]);
-  }
-  return a;
-}
 
 std::atomic<bool> g_alive = true;
 
@@ -98,6 +67,39 @@ auto main(int argc, char *argv[]) -> int {
         std::cerr << "runner errored, finished" << std::endl;
       }
     });
+  }
+
+  // Headless mode: no TUI. Print a tidy per-thread + aggregate line every
+  // second, and a final summary (over the sampled aggregate means) on exit.
+  if (!a.ui) {
+    Statistics agg;
+    auto sample = [&](const char *tag) {
+      auto snap = metrics.copy();
+      double sum = 0;
+      std::cout << tag;
+      for (int i = 0; i < a.threads; ++i) {
+        auto it = snap.find(i);
+        MetricSnapshot s = it != snap.end() ? it->second : MetricSnapshot{};
+        std::cout << "  t" << i << " mean=" << s.mean << " sd=" << s.stddev
+                  << " n=" << s.count;
+        sum += s.mean;
+      }
+      double a_mean = a.threads ? sum / a.threads : 0.0;
+      std::cout << "  | agg=" << a_mean << std::endl;
+      return a_mean;
+    };
+
+    while (g_alive.load()) {
+      std::this_thread::sleep_for(std::operator""ms(1000));
+      agg.add(sample("[stats]"));
+    }
+
+    for (auto &t : threads) {
+      t.join();
+    }
+    std::cout << "[final] agg mean=" << agg.mean() << " sd=" << agg.stddev()
+              << " samples=" << agg.count << std::endl;
+    return 0;
   }
 
   // Dashboard model: per-thread mean history + an aggregate (mean-of-means)
@@ -189,6 +191,7 @@ auto main(int argc, char *argv[]) -> int {
 
   // Loop returned (q / Escape / Ctrl-C): tear everything down.
   g_alive.store(false);
+
   consumer.join();
   for (auto &t : threads) {
     t.join();
