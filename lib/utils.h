@@ -15,6 +15,11 @@ inline constexpr std::size_t MESSAGE_SIZE = 256;
 // failure (an error, including errno, is printed to stderr).
 int make_udp_socket();
 
+// Binds the socket to all local interfaces (0.0.0.0) on the given port.
+// `port` must already be in network byte order (e.g. from parse_port).
+// Returns 0 on success, or a negative value on failure (errno printed to stderr).
+int bind_all_interfaces(int fd, std::uint16_t port);
+
 // Parses a decimal port string and returns it in network byte order (htons).
 // Prints an error and exits the process on an out-of-range or malformed value.
 std::uint16_t parse_port(const char *port_str);

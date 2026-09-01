@@ -124,14 +124,7 @@ auto main(int argc, char *argv[]) -> int {
     return fd;
   }
 
-  // Bind to all local interfaces on the given port.
-  struct sockaddr_in addr;
-  addr.sin_family = AF_INET;
-  addr.sin_addr = in_addr{htonl(0)};
-  addr.sin_port = a.port;
-  if (bind(fd, reinterpret_cast<struct sockaddr *>(&addr), sizeof(addr)) < 0) {
-    std::cerr << "failed to bind to ip=0.0.0.0 port=" << a.port
-              << " errno=" << errno << std::endl;
+  if (utils::bind_all_interfaces(fd, a.port) < 0) {
     return -1;
   }
 

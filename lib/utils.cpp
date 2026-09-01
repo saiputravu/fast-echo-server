@@ -23,6 +23,20 @@ int make_udp_socket() {
   return fd;
 }
 
+int bind_all_interfaces(int fd, std::uint16_t port) {
+  // Bind to all local interfaces on the given port.
+  struct sockaddr_in addr;
+  addr.sin_family = AF_INET;
+  addr.sin_addr = in_addr{htonl(0)};
+  addr.sin_port = port;
+  if (bind(fd, reinterpret_cast<struct sockaddr *>(&addr), sizeof(addr)) < 0) {
+    std::cerr << "failed to bind to ip=0.0.0.0 port=" << port
+              << " errno=" << errno << std::endl;
+    return -1;
+  }
+  return 0;
+}
+
 std::uint16_t parse_port(const char *port_str) {
   long port = 0;
   try {
