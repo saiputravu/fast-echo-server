@@ -1,9 +1,7 @@
 #include "utils.h"
 
-#include <algorithm>
 #include <arpa/inet.h>
 #include <cerrno>
-#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -12,10 +10,12 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <thread>
+#include <vector>
 
 struct args {
   ushort port;
   bool connected;
+  bool preferred;
 };
 
 uint64_t counter{0};
@@ -23,14 +23,29 @@ bool alive{true};
 
 auto parse_args(int argc, char *argv[]) -> args {
   if (argc < 2) {
-    std::cerr << "Usage: " << argv[0] << " <port> [-c|--connect]" << std::endl;
+    std::cerr << "Usage: " << argv[0]
+              << " <port> [-c|--connect] [-p|--preferred]" << std::endl;
     exit(-1);
   }
 
-  struct args a;
+  struct args a{.connected = false, .preferred = false};
   a.port = utils::parse_port(argv[1]);
-  a.connected = argc >= 3 && (std::strcmp(argv[2], "-c") == 0 ||
-                              std::strcmp(argv[2], "--connect") == 0);
+
+  auto compare = [](const std::string &val, const std::string &_short,
+                    const std::string &_long) {
+    return val == _short || val == _long;
+  };
+
+  // This is a poor way of doing this, but eh.
+  std::vector<std::string> args;
+  for (int i = 2; i < argc; ++i) {
+    if (compare(argv[i], "-c", "--connect")) {
+      a.connected = true;
+    } else if (compare(argv[i], "-p", "--prefer")) {
+      a.preferred = true;
+    }
+  }
+
   return a;
 }
 
@@ -127,6 +142,17 @@ auto main(int argc, char *argv[]) -> int {
     return -1;
   }
   std::cout << "SO_BUSY_POLL val=" << val << " set" << std::endl;
+
+  if (a.preferred) {
+    val = 1;
+    if (setsockopt(fd, SOL_SOCKET, SO_PREFER_BUSY_POLL, &val, sizeof(val)) <
+        0) {
+      std::cerr << "failed to set SO_PREFER_BUSY_POL with val=" << val
+                << " errno=" << errno << std::endl;
+      return -1;
+    }
+    std::cout << "SO_PREFER_BUSY_POLL val=" << val << " set" << std::endl;
+  }
 
   long *message = reinterpret_cast<long *>(calloc(utils::MESSAGE_SIZE, 1));
 
