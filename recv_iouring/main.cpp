@@ -80,7 +80,7 @@ auto setup_buffers(context &ctx) -> int {
       (sizeof(struct io_uring_buf) + buffer_size(ctx)) * N_BUFFERS;
   auto mapped = mmap(nullptr, ctx.buf_ring_size, PROT_READ | PROT_WRITE,
                      MAP_ANONYMOUS | MAP_PRIVATE, 0, 0);
-  if (mapped == nullptr) {
+  if (mapped == MAP_FAILED) {
     std::cerr << "failed to mmap errno=" << errno << std::endl;
     return -1;
   }
@@ -161,7 +161,11 @@ auto start_multishot_recv(context &ctx) -> int {
   // Important note: this method requires IOSQE_BUFFER_SELECT according to
   // its manpage. What this means is that we needed to have pre-registered
   // some buffers that the kernel side can write recvmsg data packets to.
-  io_uring_prep_recvmsg_multishot(sqe, ctx.fd, &ctx.mhdr, IOSQE_BUFFER_SELECT);
+  // MSG_TRUNC lets res report the full datagram length even when it overflows
+  // the buffer. buf_group picks the group we registered in setup_buffers.
+  io_uring_prep_recvmsg_multishot(sqe, ctx.fd, &ctx.mhdr, MSG_TRUNC);
+  io_uring_sqe_set_flags(sqe, IOSQE_BUFFER_SELECT);
+  sqe->buf_group = 0;
 
   // For all recvs, we set user_data as RECV_ID.
   io_uring_sqe_set_data64(sqe, RECV_ID);
@@ -322,10 +326,19 @@ auto main(int argc, char *argv[]) -> int {
   struct io_uring_params p{0};
   p.sq_thread_idle = 100;
   p.flags = IORING_SETUP_SQPOLL | IORING_SETUP_SINGLE_ISSUER;
-  auto err = io_uring_queue_init_params(10, &ctx.ring, &p);
+  // Depth matches the buffer ring so the multishot recv plus one in-flight send
+  // per buffer always have an sqe to grab.
+  auto err = io_uring_queue_init_params(N_BUFFERS, &ctx.ring, &p);
   if (err < 0) {
     std::cerr << "failed to setup io_uring" << a.port << " err=" << err
               << std::endl;
+    return err;
+  }
+
+  // Register the provided-buffer ring the kernel writes recv'd datagrams into.
+  err = setup_buffers(ctx);
+  if (err < 0) {
+    std::cerr << "failed to setup buffers err=" << err << std::endl;
     return err;
   }
 
@@ -339,7 +352,9 @@ auto main(int argc, char *argv[]) -> int {
                     .msg_controllen = 0,
                     .msg_flags = 0};
 
-  struct io_uring_cqe *cqe_head = nullptr;
+  // io_uring_peek_batch_cqe reaps up to BATCH completions into this array.
+  const unsigned BATCH = 512;
+  struct io_uring_cqe *cqes[BATCH];
 
   err = start_multishot_recv(ctx);
   if (err < 0) {
@@ -355,9 +370,9 @@ auto main(int argc, char *argv[]) -> int {
       continue;
     }
 
-    auto count = io_uring_peek_batch_cqe(&ctx.ring, &cqe_head, 1024);
+    auto count = io_uring_peek_batch_cqe(&ctx.ring, cqes, BATCH);
     for (int i = 0; i < count; ++i) {
-      err = handle_cqe(ctx, (&cqe_head)[i]);
+      err = handle_cqe(ctx, cqes[i]);
       if (err < 0) {
         std::cerr << "failed to handle idx=" << i << " err=" << err
                   << std::endl;
