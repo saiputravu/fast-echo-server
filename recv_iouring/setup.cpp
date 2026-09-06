@@ -1,7 +1,10 @@
 #include "setup.h"
+#include <atomic>
+#include <bitset>
+#include <cstdint>
 #include <iostream>
+#include <mutex>
 #include <sys/mman.h>
-
 
 auto IOURingSetup::setup_buffers(context &ctx) -> int {
   // Try MMAP the region of memory we want shared. We allocate N_BUFFERS worth
@@ -59,13 +62,12 @@ auto IOURingSetup::setup_buffers(context &ctx) -> int {
   return 0;
 }
 
+// recycle_buffer is expected to only be called by the owner of the buffer.
+// There may only be one owner in the buffer at any time.
 void IOURingSetup::recycle_buffer(context &ctx, uint64_t i) {
-  // Re-register buffer. When the CQE responds in this buffer, it acts as if its
-  // "consumed". Therefore, we need to re-assign for the same index, the same
-  // buffer.
   auto mask = io_uring_buf_ring_mask(N_BUFFERS);
   io_uring_buf_ring_add(ctx.buf_ring, get_buffer(ctx, i), buffer_size(ctx), i,
-                        mask, i);
+                        mask, 0);
   io_uring_buf_ring_advance(ctx.buf_ring, 1);
 }
 

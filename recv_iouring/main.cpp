@@ -53,8 +53,12 @@ auto handle_cqe_recv(IOURingSetup::context &ctx, struct io_uring_cqe *cqe_head)
   // which is what we should expect for multishot.
   if (!(cqe_head->flags & IORING_CQE_F_MORE)) {
     // Discard this.
-    std::cerr << "IORING_CQE_F_MORE not set" << std::endl;
-    return cqe_head->res;
+    // Re-start multishot recv.
+    std::cerr << "NOTE::::IORING_CQE_F_MORE not set, restarting multishot recv"
+              << std::endl;
+    auto ret = IOURingSetup::start_multishot_recv(ctx);
+    if (ret)
+      return ret;
   }
 
   if (cqe_head->res == -ENOBUFS) {
@@ -98,7 +102,7 @@ auto handle_cqe_recv(IOURingSetup::context &ctx, struct io_uring_cqe *cqe_head)
     return 0;
   }
 
-  // Setup for sending.
+  // Setup for sending, we expect a 112 byte payload.
   long *payload =
       reinterpret_cast<long *>(io_uring_recvmsg_payload(out, &ctx.mhdr));
   auto payload_len =
@@ -114,7 +118,7 @@ auto handle_cqe_recv(IOURingSetup::context &ctx, struct io_uring_cqe *cqe_head)
   for (int i = 0; i < payload_len / sizeof(uint64_t); ++i) {
     payload[i] ^= i;
   }
-
+  
   // TODO(saiputravu):
   // Create the associated msghdr. I think there is possible optimisation we can
   // do here. For example, we can use io_uring_pre_sendmsg_zc. Also, across all
@@ -127,8 +131,6 @@ auto handle_cqe_recv(IOURingSetup::context &ctx, struct io_uring_cqe *cqe_head)
   ctx.send_mhdrs[idx].iov.iov_len = payload_len;
   ctx.send_mhdrs[idx].mhdr.msg_name = io_uring_recvmsg_name(out);
   ctx.send_mhdrs[idx].mhdr.msg_namelen = out->namelen;
-
-  // io_uring_prep_sendmsg(sqe, ctx.fd, &ctx.send_mhdrs[idx].mhdr, 0);
   io_uring_prep_sendmsg(sqe, ctx.fd, &ctx.send_mhdrs[idx].mhdr, 0);
 
   // Set the user_data, so that the CQE lets us identify which buffer was used.
@@ -227,7 +229,7 @@ auto main(int argc, char *argv[]) -> int {
                     .msg_flags = 0};
 
   // io_uring_peek_batch_cqe reaps up to BATCH completions into this array.
-  const unsigned BATCH = 512;
+  const unsigned BATCH = 128;
   struct io_uring_cqe *cqes[BATCH];
 
   err = start_multishot_recv(ctx);

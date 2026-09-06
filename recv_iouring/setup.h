@@ -1,14 +1,17 @@
 #pragma once
 
 #include "utils.h"
+#include <bitset>
 #include <cstdlib>
 #include <iostream>
 #include <liburing.h>
+#include <mutex>
 #include <sys/mman.h>
 
 namespace IOURingSetup {
 const uint64_t N_BUFFERS = 64 * 16;
-const uint64_t BUF_SHIFT = 8; // Buf size is 256 bytes.
+const uint64_t BUF_SHIFT =
+    9; // Buf size is 256 bytes, but we over estimate for headers.
 
 // We use user_data to indicate which CQE came from where. We want to know which
 // buffer that we set up was used. This means that on the recv -> sending side,
@@ -55,6 +58,8 @@ struct context {
 
   // Space for kernel to access concurrent locations.
   hdrs send_mhdrs[N_BUFFERS];
+  std::bitset<N_BUFFERS> to_recycle;
+  std::mutex mu;
 
   long *message;
 
@@ -84,6 +89,10 @@ auto setup_buffers(context &ctx) -> int;
 // recycle_buffer re-adds a consumed buffer (second half of the mmapped region
 // in setup_buffers).
 void recycle_buffer(context &ctx, uint64_t i);
+
+auto acquire_buf(context &ctx, uint64_t i) -> bool;
+
+auto any_bufs_left(context &ctx) -> bool;
 
 // Maybe just make these into desctructers under OOP, but its too much effort
 // for now.

@@ -261,10 +261,10 @@ int runner(int thread_id, in_addr ip, ushort port, std::string ip_str,
       continue;
     }
 
-    // Track the id->timestamp mapping. This is slightly annoying, but it is fine
-    // as the docs guarantee that it starts from 0 at file descriptor
+    // Track the id->timestamp mapping. This is slightly annoying, but it is
+    // fine as the docs guarantee that it starts from 0 at file descriptor
     // instantiation. last_id is one ahead of id.
-    rx_tss.set(last_id-1, rx_ts);
+    rx_tss.set(last_id - 1, rx_ts);
 
     // The actual rx<-->tx matching is done in the background threads.
   }
