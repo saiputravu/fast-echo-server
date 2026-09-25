@@ -9,7 +9,8 @@
 #include <sys/mman.h>
 
 namespace IOURingSetup {
-const uint64_t N_BUFFERS = 64 * 16;
+const uint64_t QD = 64;
+const uint64_t N_BUFFERS = QD * 16;
 const uint64_t BUF_SHIFT =
     9; // Buf size is 256 bytes, but we over estimate for headers.
 

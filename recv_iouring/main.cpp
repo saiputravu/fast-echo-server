@@ -199,7 +199,7 @@ auto main(int argc, char *argv[]) -> int {
   // Ref: https://unixism.net/loti/low_level.html
   // Ref: https://man7.org/linux/man-pages/man7/io_uring_setup_flags.7.html
   struct io_uring_params p{0};
-  p.sq_thread_idle = 100;
+  p.sq_thread_idle = 10;
   p.flags = IORING_SETUP_SQPOLL | IORING_SETUP_SINGLE_ISSUER;
 
   // Depth matches the buffer ring so the multishot recv plus one in-flight send
